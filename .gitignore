@@ -1,0 +1,6 @@
+/vendor/
+/dp-phpcs.json
+/dp-semgrep.json
+.DS_Store
+/_to_delete/
+/_workflows-to-move/

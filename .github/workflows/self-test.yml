@@ -1,0 +1,43 @@
+# CI of this repository: every rule must fire on its bad fixture and stay silent on its good one,
+# and the gate must behave (baseline, moved code, new finding).
+name: self-test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixtures:
+    name: Fixtures and gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Tool versions (runner image)
+        run: |
+          php --version
+          composer --version
+          python3 --version
+
+      - name: Install PHPCS + WPCS (composer.json pins)
+        run: composer install --no-dev --no-interaction --no-progress --prefer-dist
+
+      - name: Install Semgrep (tools.env pin)
+        run: |
+          source tools.env
+          pipx install "semgrep==${SEMGREP_VERSION}"
+
+      - name: Run tests/run.sh
+        run: bash tests/run.sh

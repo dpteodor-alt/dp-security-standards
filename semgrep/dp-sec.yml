@@ -1,0 +1,895 @@
+# DP Security Standards — Semgrep rules (DP-SEC-001 ... DP-SEC-019; 009-012 live in phpcs/ruleset.xml).
+#
+# Every rule maps to a row in README.md and to tests/fixtures/DP-SEC-NNN/{bad,good}.php; tests/run.sh proves
+# that each bad case fires and each good case stays silent.
+# Severity: ERROR fails the CI gate (unless baselined); WARNING is reported only.
+#
+# Suppress a reviewed finding with a justification on the same line or the line above:
+#   // nosemgrep: dp-sec-001-readonly -- public list of published events, no private fields
+#
+# Allowlist styles the taint rules understand (use one of them):
+#   $x = in_array( $x, $allowed, true ) ? $x : 'default';
+#   if ( ! in_array( $x, $allowed, true ) ) { return; }      (also array_key_exists / isset( $map[ $x ] ))
+#   $x = isset( $map[ $key ] ) ? $map[ $key ] : 'default';
+#   $x = dp_allowlist( $x, $allowed, 'default' );
+#
+# Known limits (Semgrep Community Edition):
+#   - taint tracking stays inside one function: flows through helpers or across files are not followed;
+#   - callbacks given by name ([ $this, 'method' ], 'my_function') are not resolved to their body;
+#   - calls written with a leading backslash (\update_option()) are not matched;
+#   - arguments built in a variable before register_rest_route() are not inspected (DP-SEC-001).
+
+rules:
+- id: dp-sec-001
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-001: REST route that changes data has an open permission_callback, or the route has no permission_callback
+    at all. State who may call it: current_user_can() with the object ID, or a verified signature for webhooks. A nonce is
+    not authorization.'
+  metadata:
+    dp-sec-id: DP-SEC-001
+    cwe: 'CWE-862: Missing Authorization'
+  patterns:
+  - pattern-inside: register_rest_route(...)
+  - pattern-either:
+    - patterns:
+      - pattern: '[..., ''methods'' => $METHODS, ...]'
+      - pattern-not: '[..., ''methods'' => "=~/(?i)^\s*get\s*$/", ...]'
+      - pattern-not: '[..., ''methods'' => WP_REST_Server::READABLE, ...]'
+      - pattern-not: '[..., ''methods'' => \WP_REST_Server::READABLE, ...]'
+      - pattern-not: '[..., ''methods'' => array("=~/(?i)^\s*get\s*$/"), ...]'
+      - pattern-not: '[..., ''methods'' => ["=~/(?i)^\s*get\s*$/"], ...]'
+      - pattern-either:
+        - pattern: '[..., ''permission_callback'' => "=~/(?i)^__return_true$/", ...]'
+        - pattern: '[..., ''permission_callback'' => '''', ...]'
+        - pattern: '[..., ''permission_callback'' => null, ...]'
+        - patterns:
+          - pattern: '[..., ''permission_callback'' => $CB, ...]'
+          - metavariable-regex:
+              metavariable: '$CB'
+              regex: '(?is)^\s*((static\s+)?fn\s*\([^)]*\)\s*(:\s*\??\\?\w+\s*)?=>\s*true|(static\s+)?function\s*\([^)]*\)\s*(:\s*\??\\?\w+\s*)?\{\s*return\s+true\s*;\s*\})\s*$'
+    - patterns:
+      - pattern: '[..., ''callback'' => $HANDLER, ...]'
+      - pattern-not: '[..., ''permission_callback'' => $ANY, ...]'
+- id: dp-sec-001-readonly
+  languages:
+  - php
+  severity: WARNING
+  message: 'DP-SEC-001: read-only REST route is public. Confirm it returns only public data (published, not password-protected,
+    no private meta) and add a justification: // nosemgrep: dp-sec-001-readonly -- <what it returns>'
+  metadata:
+    dp-sec-id: DP-SEC-001
+    cwe: 'CWE-200: Exposure of Sensitive Information'
+  patterns:
+  - pattern-inside: register_rest_route(...)
+  - pattern-either:
+    - pattern: '[..., ''permission_callback'' => "=~/(?i)^__return_true$/", ...]'
+    - pattern: '[..., ''permission_callback'' => '''', ...]'
+    - pattern: '[..., ''permission_callback'' => null, ...]'
+    - patterns:
+      - pattern: '[..., ''permission_callback'' => $CB, ...]'
+      - metavariable-regex:
+          metavariable: '$CB'
+          regex: '(?is)^\s*((static\s+)?fn\s*\([^)]*\)\s*(:\s*\??\\?\w+\s*)?=>\s*true|(static\s+)?function\s*\([^)]*\)\s*(:\s*\??\\?\w+\s*)?\{\s*return\s+true\s*;\s*\})\s*$'
+  - pattern-either:
+    - pattern: '[..., ''methods'' => "=~/(?i)^\s*get\s*$/", ...]'
+    - pattern: '[..., ''methods'' => WP_REST_Server::READABLE, ...]'
+    - pattern: '[..., ''methods'' => \WP_REST_Server::READABLE, ...]'
+    - pattern: '[..., ''methods'' => array("=~/(?i)^\s*get\s*$/"), ...]'
+    - pattern: '[..., ''methods'' => ["=~/(?i)^\s*get\s*$/"], ...]'
+    - patterns:
+      - pattern: '[..., ''callback'' => $HANDLER, ...]'
+      - pattern-not: '[..., ''methods'' => $M, ...]'
+- id: dp-sec-002
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-002: permission callback relies on a nonce only. A nonce proves intent, not identity (Bricks CVE-2024-25600,
+    CVE-2026-118804). Add current_user_can() with the object ID, or verify a server-made signature.'
+  metadata:
+    dp-sec-id: DP-SEC-002
+    cwe: 'CWE-862: Missing Authorization'
+  pattern-either:
+  - patterns:
+    - pattern: 'function $F(...) { ... }'
+    - metavariable-regex:
+        metavariable: '$F'
+        regex: '(?i)^(.*(permissions?_check|check_permissions?|permission_callback|_can_|authori[sz]e)|can_)'
+    - pattern-either:
+      - pattern: 'function $F(...) { ... <... wp_verify_nonce(...) ...>; ... }'
+      - pattern: 'function $F(...) { ... <... check_ajax_referer(...) ...>; ... }'
+      - pattern: 'function $F(...) { ... <... check_admin_referer(...) ...>; ... }'
+    - pattern-not: 'function $F(...) { ... <... current_user_can(...) ...>; ... }'
+    - pattern-not: 'function $F(...) { ... <... user_can(...) ...>; ... }'
+    - pattern-not: 'function $F(...) { ... <... $CAPUSER->has_cap(...) ...>; ... }'
+    - pattern-not: 'function $F(...) { ... <... is_super_admin(...) ...>; ... }'
+    - pattern-not: 'function $F(...) { ... <... is_user_logged_in() ...>; ... }'
+    - pattern-not: 'function $F(...) { ... <... hash_equals(...) ...>; ... }'
+    - pattern-not: 'function $F(...) { ... <... dp_verify_state(...) ...>; ... }'
+  - patterns:
+    - pattern-inside: register_rest_route(...)
+    - pattern: '[..., ''permission_callback'' => $CB, ...]'
+    - focus-metavariable: '$CB'
+    - metavariable-regex:
+        metavariable: '$CB'
+        regex: '(?s)^(?!.*(current_user_can|user_can|has_cap|is_super_admin|is_user_logged_in|hash_equals|dp_verify_state)).*(wp_verify_nonce|check_ajax_referer|check_admin_referer)'
+- id: dp-sec-003
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-003: unauthenticated handler (nopriv). Anyone can call it. It must not change state unless it verifies
+    a server-made or provider signature, and it must be justified: // nosemgrep: dp-sec-003 -- <who calls it and what protects
+    it>'
+  metadata:
+    dp-sec-id: DP-SEC-003
+    cwe: 'CWE-862: Missing Authorization'
+  pattern-either:
+  - pattern: 'add_action("=~/^(wp_ajax_nopriv_|admin_post_nopriv)/", ...)'
+  - pattern: 'add_action(''wp_ajax_nopriv_'' . $X, ...)'
+  - pattern: 'add_action(''admin_post_nopriv_'' . $X, ...)'
+- id: dp-sec-004
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-004: a request value sets the query scope (post_status, post_type, ...). The client can widen it to drafts,
+    private posts or other post types. Use a strict allowlist (in_array(..., true), dp_allowlist()); sanitize_text_field()/sanitize_key()
+    are not enough.'
+  metadata:
+    dp-sec-id: DP-SEC-004
+    cwe: 'CWE-639: Authorization Bypass Through User-Controlled Key'
+  mode: taint
+  pattern-sources: &id001
+  - pattern: '$_GET'
+  - pattern: '$_POST'
+  - pattern: '$_REQUEST'
+  - pattern: '$_COOKIE'
+  - patterns:
+    - pattern: '$_FILES'
+    - pattern-not-inside: '$_FILES[$K][''tmp_name'']'
+  - pattern: filter_input(...)
+  - pattern: 'file_get_contents(''php://input'')'
+  - pattern: '$REQ->get_param(...)'
+  - pattern: '$REQ->get_params()'
+  - pattern: '$REQ->get_json_params()'
+  - pattern: '$REQ->get_body_params()'
+  - pattern: '$REQ->get_query_params()'
+  - pattern: '$REQ->get_file_params()'
+  - pattern: '$REQ->get_body()'
+  - patterns:
+    - pattern: '$REQ[$KEY]'
+    - metavariable-regex:
+        metavariable: '$REQ'
+        regex: '^\$(request|req|wp_request|rest_request)$'
+  pattern-sanitizers:
+  - pattern: (int) $X
+  - pattern: (float) $X
+  - pattern: (bool) $X
+  - pattern: absint(...)
+  - pattern: intval(...)
+  - pattern: floatval(...)
+  - pattern: boolval(...)
+  - pattern: wp_validate_boolean(...)
+  - pattern: rest_sanitize_boolean(...)
+  - pattern: count(...)
+  - &id002
+    pattern: 'in_array($X, $ALLOWED, true) ? $X : $DEFAULT'
+  - &id003
+    pattern: dp_allowlist(...)
+  - &id004
+    patterns:
+    - pattern: 'isset($MAP[$K]) ? $MAP[$K] : $DEFAULT'
+    - metavariable-regex:
+        metavariable: '$MAP'
+        regex: '^\$(?!_(GET|POST|REQUEST|COOKIE|FILES|SERVER)\b)(?!(request|req|wp_request|rest_request)$)\w+$'
+  - &id005
+    by-side-effect: true
+    patterns:
+    - pattern: 'in_array($X, $ALLOWED, true)'
+    - focus-metavariable: '$X'
+  - &id006
+    by-side-effect: true
+    patterns:
+    - pattern: 'array_key_exists($X, $MAP)'
+    - focus-metavariable: '$X'
+  - &id007
+    by-side-effect: true
+    patterns:
+    - pattern: 'isset($MAP[$X])'
+    - metavariable-regex:
+        metavariable: '$MAP'
+        regex: '^\$(?!_(GET|POST|REQUEST|COOKIE|FILES|SERVER)\b)(?!(request|req|wp_request|rest_request)$)\w+$'
+    - focus-metavariable: '$X'
+  - by-side-effect: true
+    patterns:
+    - pattern: is_post_type_viewable($X)
+    - focus-metavariable: '$X'
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: '[..., "=~/^(post_status|post_type|perm|has_password|post_password|suppress_filters|post_mime_type)$/" =>
+          $VALUE, ...]'
+      - pattern: '$ARGS["=~/^(post_status|post_type|perm|has_password|post_password|suppress_filters|post_mime_type)$/"] =
+          $VALUE'
+      - pattern: '$QUERY->set("=~/^(post_status|post_type|perm|has_password|post_password|suppress_filters|post_mime_type)$/",
+          $VALUE)'
+    - focus-metavariable: '$VALUE'
+- id: dp-sec-004-ids
+  languages:
+  - php
+  severity: WARNING
+  message: 'DP-SEC-004: the client chooses which IDs are queried. Make sure post_status and post_type are fixed on the server,
+    or validate each ID (expected type, published, not password-protected).'
+  metadata:
+    dp-sec-id: DP-SEC-004
+    cwe: 'CWE-639: Authorization Bypass Through User-Controlled Key'
+  mode: taint
+  pattern-sources: *id001
+  pattern-sanitizers:
+  - *id002
+  - *id003
+  - *id004
+  - *id005
+  - *id006
+  - *id007
+  - pattern: array_intersect(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: '[..., "=~/^(p|page_id|post__in|post_parent|post_parent__in|post_name__in|name|author|author__in)$/" => $VALUE,
+          ...]'
+      - pattern: '$ARGS["=~/^(p|page_id|post__in|post_parent|post_parent__in|post_name__in|name|author|author__in)$/"] = $VALUE'
+      - pattern: '$QUERY->set("=~/^(p|page_id|post__in|post_parent|post_parent__in|post_name__in|name|author|author__in)$/",
+          $VALUE)'
+    - focus-metavariable: '$VALUE'
+- id: dp-sec-004-whole-args
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-004: query arguments come from the request as a whole (the Bricks CVE-2026-118804 pattern). Rebuild the
+    query from saved server settings, or verify a server-made signature (dp_verify_state) and then constrain post_type/post_status
+    again.'
+  metadata:
+    dp-sec-id: DP-SEC-004
+    cwe: 'CWE-639: Authorization Bypass Through User-Controlled Key'
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: '$_GET'
+      - pattern: '$_POST'
+      - pattern: '$_REQUEST'
+    - pattern-not-inside: '$SG[$K]'
+  - pattern: '$_GET["=~/(?i)(query|args|vars|params|filters?)/"]'
+  - pattern: '$_POST["=~/(?i)(query|args|vars|params|filters?)/"]'
+  - pattern: '$_REQUEST["=~/(?i)(query|args|vars|params|filters?)/"]'
+  - pattern: '$REQ->get_param("=~/(?i)(query|args|vars|params|filters?)/")'
+  - pattern: '$request["=~/(?i)(query|args|vars|params|filters?)/"]'
+  - pattern: '$REQ->get_params()'
+  - pattern: '$REQ->get_json_params()'
+  - pattern: '$REQ->get_body_params()'
+  - pattern: '$REQ->get_query_params()'
+  - patterns:
+    - pattern-either:
+      - pattern: 'json_decode($RAW, ...)'
+      - pattern: maybe_unserialize($RAW)
+      - pattern: 'unserialize($RAW, ...)'
+    - metavariable-pattern:
+        metavariable: '$RAW'
+        pattern-either:
+        - pattern: '$_GET'
+        - pattern: '$_POST'
+        - pattern: '$_REQUEST'
+        - pattern: '$_COOKIE'
+        - pattern: '$REQ->get_param(...)'
+        - pattern: '$REQ->get_body()'
+        - pattern: '$request[$K]'
+  pattern-sanitizers:
+  - pattern: array_intersect_key(...)
+  - pattern: wp_array_slice_assoc(...)
+  - pattern: dp_allowlist(...)
+  - by-side-effect: true
+    patterns:
+    - pattern: 'dp_verify_state($X, ...)'
+    - focus-metavariable: '$X'
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: 'new WP_Query($ARGS, ...)'
+      - pattern: 'new \WP_Query($ARGS, ...)'
+      - pattern: 'get_posts($ARGS, ...)'
+      - pattern: 'query_posts($ARGS, ...)'
+      - pattern: 'get_pages($ARGS, ...)'
+      - pattern: '$Q->query($ARGS)'
+    - focus-metavariable: '$ARGS'
+- id: dp-sec-005
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-005: eval/create_function/string assert runs code. Remove it (Bricks CVE-2024-25600).'
+  metadata:
+    dp-sec-id: DP-SEC-005
+    cwe: 'CWE-94: Code Injection'
+  pattern-either:
+  - pattern: eval(...)
+  - pattern: create_function(...)
+  - pattern: 'assert("...", ...)'
+  - pattern: 'assert("..." . $X, ...)'
+- id: dp-sec-005-taint
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-005: a request value chooses code to run (callable, class, shortcode or variables). Map the input to an
+    allowlist of callables; never pass it to do_shortcode(), extract() or call_user_func().'
+  metadata:
+    dp-sec-id: DP-SEC-005
+    cwe: 'CWE-94: Code Injection'
+  mode: taint
+  pattern-sources: *id001
+  pattern-sanitizers: &id009
+  - *id002
+  - *id003
+  - *id004
+  - *id005
+  - *id006
+  - *id007
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: 'call_user_func($CALLABLE, ...)'
+      - pattern: 'call_user_func_array($CALLABLE, ...)'
+      - pattern: 'array_map($CALLABLE, ...)'
+      - pattern: 'array_filter($A, $CALLABLE, ...)'
+      - pattern: 'array_walk($A, $CALLABLE, ...)'
+      - pattern: 'usort($A, $CALLABLE)'
+      - pattern: 'uasort($A, $CALLABLE)'
+      - pattern: 'uksort($A, $CALLABLE)'
+      - pattern: 'add_action($H, $CALLABLE, ...)'
+      - pattern: 'add_filter($H, $CALLABLE, ...)'
+      - pattern: 'do_shortcode($CALLABLE, ...)'
+      - pattern: 'extract($CALLABLE, ...)'
+      - pattern: parse_str($CALLABLE)
+    - focus-metavariable: '$CALLABLE'
+  - patterns:
+    - pattern-either:
+      - pattern: '$CALLABLE(...)'
+      - pattern: new $CALLABLE(...)
+    - metavariable-regex:
+        metavariable: '$CALLABLE'
+        regex: ^\$\w+$
+    - focus-metavariable: '$CALLABLE'
+- id: dp-sec-006
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-006: request or cookie data reaches unserialize()/maybe_unserialize() (PHP object injection). Use json_decode();
+    if unserialize is unavoidable, pass [''allowed_classes'' => false].'
+  metadata:
+    dp-sec-id: DP-SEC-006
+    cwe: 'CWE-502: Deserialization of Untrusted Data'
+  mode: taint
+  pattern-sources: *id001
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: 'unserialize($DATA, ...)'
+      - pattern: maybe_unserialize($DATA)
+    - pattern-not: 'unserialize($DATA, [''allowed_classes'' => false])'
+    - pattern-not: 'unserialize($DATA, array(''allowed_classes'' => false))'
+    - focus-metavariable: '$DATA'
+- id: dp-sec-007
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-007: a request value sets the URL of a server-side HTTP request (SSRF). Use a fixed host (add_query_arg
+    on a literal base URL) and wp_safe_remote_get()/wp_safe_remote_post().'
+  metadata:
+    dp-sec-id: DP-SEC-007
+    cwe: 'CWE-918: Server-Side Request Forgery'
+  mode: taint
+  pattern-sources: *id001
+  pattern-sanitizers:
+  - pattern: 'add_query_arg($ARGS, "...")'
+  - *id002
+  - *id003
+  - *id004
+  - *id005
+  - *id006
+  - *id007
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: 'wp_remote_get($URL, ...)'
+      - pattern: 'wp_remote_post($URL, ...)'
+      - pattern: 'wp_remote_head($URL, ...)'
+      - pattern: 'wp_remote_request($URL, ...)'
+      - pattern: 'download_url($URL, ...)'
+      - pattern: curl_init($URL)
+      - pattern: 'curl_setopt($C, CURLOPT_URL, $URL)'
+      - pattern: '$HTTP->request($URL, ...)'
+    - focus-metavariable: '$URL'
+- id: dp-sec-008
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-008: a request value builds a file path (include, read, write or delete). Map it to an allowlisted name,
+    or reduce it with basename()/sanitize_file_name()/validate_file(), or build it with dp_safe_path().'
+  metadata:
+    dp-sec-id: DP-SEC-008
+    cwe: 'CWE-22: Path Traversal'
+  mode: taint
+  pattern-sources: *id001
+  pattern-sanitizers:
+  - pattern: basename(...)
+  - pattern: sanitize_file_name(...)
+  - pattern: sanitize_key(...)
+  - pattern: absint(...)
+  - pattern: intval(...)
+  - pattern: (int) $X
+  - pattern: dp_safe_path(...)
+  - *id002
+  - *id003
+  - *id004
+  - *id005
+  - *id006
+  - *id007
+  - by-side-effect: true
+    patterns:
+    - pattern: 'validate_file($X, ...)'
+    - focus-metavariable: '$X'
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: include $PATH;
+      - pattern: include_once $PATH;
+      - pattern: require $PATH;
+      - pattern: require_once $PATH;
+      - pattern: 'file_get_contents($PATH, ...)'
+      - pattern: 'file_put_contents($PATH, ...)'
+      - pattern: 'fopen($PATH, ...)'
+      - pattern: 'file($PATH, ...)'
+      - pattern: 'readfile($PATH, ...)'
+      - pattern: 'unlink($PATH, ...)'
+      - pattern: wp_delete_file($PATH)
+      - pattern: 'copy($PATH, ...)'
+      - pattern: 'copy($SRC, $PATH, ...)'
+      - pattern: 'rename($PATH, ...)'
+      - pattern: 'rename($SRC, $PATH, ...)'
+      - pattern: 'move_uploaded_file($SRC, $PATH)'
+      - pattern: 'mkdir($PATH, ...)'
+      - pattern: 'rmdir($PATH, ...)'
+      - pattern: 'scandir($PATH, ...)'
+      - pattern: 'opendir($PATH, ...)'
+      - pattern: 'load_template($PATH, ...)'
+      - pattern: 'locate_template($PATH, ...)'
+      - pattern: 'get_template_part($SLUG, $PATH, ...)'
+      - pattern: 'get_template_part($PATH, ...)'
+      - pattern: 'new SplFileObject($PATH, ...)'
+      - pattern: '$ZIP->extractTo($PATH, ...)'
+      - pattern: '$FS->get_contents($PATH)'
+      - pattern: '$FS->put_contents($PATH, ...)'
+      - pattern: '$FS->delete($PATH, ...)'
+    - focus-metavariable: '$PATH'
+- id: dp-sec-013
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-013: a meta key that looks secret or personal is registered with show_in_rest. show_in_rest means "public":
+    anyone who can read the object can read the value through the REST API.'
+  metadata:
+    dp-sec-id: DP-SEC-013
+    cwe: 'CWE-200: Exposure of Sensitive Information'
+  patterns:
+  - pattern-either:
+    - pattern: 'register_meta($TYPE, "=~/(?i)(api_?key|secret|token|passw|pwd|salt|auth_|email|e_mail|phone|mobile|iban|birth|ssn|afm|amka|credential|license_key|private)/",
+        $ARGS)'
+    - pattern: 'register_post_meta($TYPE, "=~/(?i)(api_?key|secret|token|passw|pwd|salt|auth_|email|e_mail|phone|mobile|iban|birth|ssn|afm|amka|credential|license_key|private)/",
+        $ARGS)'
+    - pattern: 'register_term_meta($TYPE, "=~/(?i)(api_?key|secret|token|passw|pwd|salt|auth_|email|e_mail|phone|mobile|iban|birth|ssn|afm|amka|credential|license_key|private)/",
+        $ARGS)'
+  - &id008
+    metavariable-pattern:
+      metavariable: '$ARGS'
+      patterns:
+      - pattern: '[..., ''show_in_rest'' => $SIR, ...]'
+      - pattern-not: '[..., ''show_in_rest'' => false, ...]'
+- id: dp-sec-013-review
+  languages:
+  - php
+  severity: WARNING
+  message: 'DP-SEC-013: meta registered with show_in_rest is public to anyone who can read the object. Confirm the value is
+    meant to be public and add a justification: // nosemgrep: dp-sec-013-review -- <why it is public>'
+  metadata:
+    dp-sec-id: DP-SEC-013
+    cwe: 'CWE-200: Exposure of Sensitive Information'
+  patterns:
+  - pattern-either:
+    - pattern: 'register_meta($TYPE, $KEY, $ARGS)'
+    - pattern: 'register_post_meta($TYPE, $KEY, $ARGS)'
+    - pattern: 'register_term_meta($TYPE, $KEY, $ARGS)'
+  - pattern-not: 'register_meta($TYPE, "=~/(?i)(api_?key|secret|token|passw|pwd|salt|auth_|email|e_mail|phone|mobile|iban|birth|ssn|afm|amka|credential|license_key|private)/",
+      $ARGS)'
+  - pattern-not: 'register_post_meta($TYPE, "=~/(?i)(api_?key|secret|token|passw|pwd|salt|auth_|email|e_mail|phone|mobile|iban|birth|ssn|afm|amka|credential|license_key|private)/",
+      $ARGS)'
+  - pattern-not: 'register_term_meta($TYPE, "=~/(?i)(api_?key|secret|token|passw|pwd|salt|auth_|email|e_mail|phone|mobile|iban|birth|ssn|afm|amka|credential|license_key|private)/",
+      $ARGS)'
+  - *id008
+- id: dp-sec-013-localize
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-013: a value that looks secret is sent to the browser. Secrets never reach the front end; call the remote
+    API from the server instead.'
+  metadata:
+    dp-sec-id: DP-SEC-013
+    cwe: 'CWE-200: Exposure of Sensitive Information'
+  patterns:
+  - pattern-either:
+    - pattern-inside: 'wp_localize_script($H, $O, $DATA)'
+    - pattern-inside: wp_add_inline_script(...)
+  - pattern: '[..., "=~/(?i)(secret|api_?key|private_?key|password|access_?token|refresh_?token|webhook_?secret|salt)/" =>
+      $V, ...]'
+- id: dp-sec-014
+  languages:
+  - php
+  severity: WARNING
+  message: 'DP-SEC-014: upload handled without WordPress type checks. Use wp_handle_upload()/ media_handle_upload() with the
+    default type test, or check wp_check_filetype_and_ext() before moving the file.'
+  metadata:
+    dp-sec-id: DP-SEC-014
+    cwe: 'CWE-434: Unrestricted Upload of File with Dangerous Type'
+  pattern-either:
+  - patterns:
+    - pattern: move_uploaded_file(...)
+    - pattern-not-inside: 'function $F(...) { ... <... wp_check_filetype_and_ext(...) ...>; ... }'
+    - pattern-not-inside: 'function (...) { ... <... wp_check_filetype_and_ext(...) ...>; ... }'
+  - pattern: '[..., ''test_type'' => false, ...]'
+- id: dp-sec-014-mimes
+  languages:
+  - php
+  severity: WARNING
+  message: 'DP-SEC-014: SVG or an executable type is added to the allowed upload types. SVG must be sanitized server-side
+    on upload (scripts, event handlers, external references); executable types never.'
+  metadata:
+    dp-sec-id: DP-SEC-014
+    cwe: 'CWE-434: Unrestricted Upload of File with Dangerous Type'
+  pattern-either:
+  - pattern: '$MIMES["=~/(?i)^(svgz?|php\d?|phtml|phar|pht|shtml|htaccess)$/"] = $TYPE'
+  - pattern: '[..., "=~/(?i)^(svgz?|php\d?|phtml|phar|pht|shtml|htaccess)$/" => $TYPE, ...]'
+- id: dp-sec-015
+  languages:
+  - php
+  severity: WARNING
+  message: 'DP-SEC-015: this handler checks a nonce and changes data, but checks no capability. Every logged-in user (Subscriber+)
+    can get a valid nonce. Add current_user_can() with the object ID before the write.'
+  metadata:
+    dp-sec-id: DP-SEC-015
+    cwe: 'CWE-862: Missing Authorization'
+  patterns:
+  - pattern-either:
+    - pattern: update_option(...)
+    - pattern: add_option(...)
+    - pattern: delete_option(...)
+    - pattern: update_site_option(...)
+    - pattern: add_site_option(...)
+    - pattern: delete_site_option(...)
+    - pattern: set_theme_mod(...)
+    - pattern: remove_theme_mod(...)
+    - pattern: update_post_meta(...)
+    - pattern: add_post_meta(...)
+    - pattern: delete_post_meta(...)
+    - pattern: update_user_meta(...)
+    - pattern: add_user_meta(...)
+    - pattern: delete_user_meta(...)
+    - pattern: update_user_option(...)
+    - pattern: delete_user_option(...)
+    - pattern: update_term_meta(...)
+    - pattern: add_term_meta(...)
+    - pattern: delete_term_meta(...)
+    - pattern: update_metadata(...)
+    - pattern: add_metadata(...)
+    - pattern: delete_metadata(...)
+    - pattern: update_field(...)
+    - pattern: delete_field(...)
+    - pattern: wp_insert_post(...)
+    - pattern: wp_update_post(...)
+    - pattern: wp_delete_post(...)
+    - pattern: wp_trash_post(...)
+    - pattern: wp_insert_user(...)
+    - pattern: wp_update_user(...)
+    - pattern: wp_delete_user(...)
+    - pattern: wp_set_object_terms(...)
+    - pattern: wp_set_post_terms(...)
+    - pattern: wp_insert_term(...)
+    - pattern: wp_update_term(...)
+    - pattern: wp_delete_term(...)
+    - pattern: wp_insert_attachment(...)
+    - pattern: wp_delete_attachment(...)
+    - pattern: wp_insert_comment(...)
+    - pattern: wp_update_comment(...)
+    - pattern: wp_delete_comment(...)
+    - pattern: '$U->set_role(...)'
+    - pattern: '$U->add_role(...)'
+    - pattern: '$U->add_cap(...)'
+    - pattern: '$U->remove_cap(...)'
+    - patterns:
+      - pattern-either:
+        - pattern: '$DB->insert(...)'
+        - pattern: '$DB->update(...)'
+        - pattern: '$DB->delete(...)'
+        - pattern: '$DB->replace(...)'
+        - pattern: '$DB->query(...)'
+      - metavariable-regex:
+          metavariable: '$DB'
+          regex: (?i)wpdb
+  - pattern-either:
+    - pattern-inside: 'function $F(...) { ... <... wp_verify_nonce(...) ...>; ... }'
+    - pattern-inside: 'function $F(...) { ... <... check_ajax_referer(...) ...>; ... }'
+    - pattern-inside: 'function $F(...) { ... <... check_admin_referer(...) ...>; ... }'
+    - pattern-inside: 'function (...) { ... <... wp_verify_nonce(...) ...>; ... }'
+    - pattern-inside: 'function (...) { ... <... check_ajax_referer(...) ...>; ... }'
+    - pattern-inside: 'function (...) { ... <... check_admin_referer(...) ...>; ... }'
+  - pattern-not-inside: 'function $F(...) { ... <... current_user_can(...) ...>; ... }'
+  - pattern-not-inside: 'function $F(...) { ... <... user_can(...) ...>; ... }'
+  - pattern-not-inside: 'function $F(...) { ... <... $CAPUSER->has_cap(...) ...>; ... }'
+  - pattern-not-inside: 'function $F(...) { ... <... is_super_admin(...) ...>; ... }'
+  - pattern-not-inside: 'function (...) { ... <... current_user_can(...) ...>; ... }'
+  - pattern-not-inside: 'function (...) { ... <... user_can(...) ...>; ... }'
+  - pattern-not-inside: 'function (...) { ... <... $CAPUSER->has_cap(...) ...>; ... }'
+  - pattern-not-inside: 'function (...) { ... <... is_super_admin(...) ...>; ... }'
+- id: dp-sec-016
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-016: a request value chooses which option/meta key, role or capability is written. This is the "arbitrary
+    options update -> administrator" class. Map the input to an allowlist of keys; sanitize_key() does not help.'
+  metadata:
+    dp-sec-id: DP-SEC-016
+    cwe: 'CWE-269: Improper Privilege Management'
+  mode: taint
+  pattern-sources: *id001
+  pattern-sanitizers: *id009
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: 'update_option($K, ...)'
+      - pattern: 'add_option($K, ...)'
+      - pattern: delete_option($K)
+      - pattern: 'update_site_option($K, ...)'
+      - pattern: 'update_user_meta($ID, $K, ...)'
+      - pattern: 'add_user_meta($ID, $K, ...)'
+      - pattern: 'delete_user_meta($ID, $K, ...)'
+      - pattern: 'update_user_option($ID, $K, ...)'
+      - pattern: 'update_post_meta($ID, $K, ...)'
+      - pattern: 'add_post_meta($ID, $K, ...)'
+      - pattern: 'delete_post_meta($ID, $K, ...)'
+      - pattern: 'update_term_meta($ID, $K, ...)'
+      - pattern: 'add_term_meta($ID, $K, ...)'
+      - pattern: 'delete_term_meta($ID, $K, ...)'
+      - pattern: 'update_metadata($T, $ID, $K, ...)'
+      - pattern: 'add_metadata($T, $ID, $K, ...)'
+      - pattern: 'update_field($K, ...)'
+      - pattern: 'delete_field($K, ...)'
+      - pattern: 'set_theme_mod($K, ...)'
+      - pattern: '$U->set_role($K)'
+      - pattern: '$U->add_role($K)'
+      - pattern: '$U->add_cap($K, ...)'
+    - focus-metavariable: '$K'
+  - patterns:
+    - pattern-either:
+      - pattern: '[..., ''role'' => $K, ...]'
+      - pattern: '$USERDATA[''role''] = $K'
+    - focus-metavariable: '$K'
+- id: dp-sec-016-userdata
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-016: the whole request is passed as user data. The client can set role, user_login or user_pass. Build
+    the array from named, sanitized fields.'
+  metadata:
+    dp-sec-id: DP-SEC-016
+    cwe: 'CWE-269: Improper Privilege Management'
+  mode: taint
+  pattern-sources: *id001
+  pattern-sanitizers:
+  - pattern: '[...]'
+  - pattern: array_intersect_key(...)
+  - pattern: wp_array_slice_assoc(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: wp_insert_user($U)
+      - pattern: wp_update_user($U)
+    - focus-metavariable: '$U'
+- id: dp-sec-017
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-017: is_admin() only says the request goes to an admin URL. It is true for every admin-ajax.php and admin-post.php
+    call, including unauthenticated ones. Use current_user_can().'
+  metadata:
+    dp-sec-id: DP-SEC-017
+    cwe: 'CWE-863: Incorrect Authorization'
+  pattern-either:
+  - pattern: '[..., ''permission_callback'' => ''is_admin'', ...]'
+  - patterns:
+    - pattern: is_admin()
+    - pattern-either:
+      - patterns:
+        - pattern-inside: 'function $F(...) { ... }'
+        - metavariable-regex:
+            metavariable: '$F'
+            regex: '(?i)^(.*(permissions?_check|check_permissions?|permission_callback|_can_|authori[sz]e)|can_)'
+      - pattern-inside: '[..., ''permission_callback'' => function (...) { ... }, ...]'
+      - patterns:
+        - pattern-either:
+          - pattern-inside: 'function $F(...) { ... <... $_POST ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... $_GET ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... $_REQUEST ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... $REQ->get_param(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... $request[$K] ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... $_POST ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... $_GET ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... $_REQUEST ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... $REQ->get_param(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... $request[$K] ...>; ... }'
+        - pattern-either:
+          - pattern-inside: 'function $F(...) { ... <... update_option(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... add_option(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... delete_option(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... update_site_option(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... add_site_option(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... delete_site_option(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... set_theme_mod(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... remove_theme_mod(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... update_post_meta(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... add_post_meta(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... delete_post_meta(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... update_user_meta(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... add_user_meta(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... delete_user_meta(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... update_user_option(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... delete_user_option(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... update_term_meta(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... add_term_meta(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... delete_term_meta(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... update_metadata(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... add_metadata(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... delete_metadata(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... update_field(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... delete_field(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_insert_post(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_update_post(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_delete_post(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_trash_post(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_insert_user(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_update_user(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_delete_user(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_set_object_terms(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_set_post_terms(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_insert_term(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_update_term(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_delete_term(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_insert_attachment(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_delete_attachment(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_insert_comment(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_update_comment(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... wp_delete_comment(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... $U->set_role(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... $U->add_cap(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... $wpdb->insert(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... $wpdb->update(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... $wpdb->delete(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... $wpdb->replace(...) ...>; ... }'
+          - pattern-inside: 'function $F(...) { ... <... $wpdb->query(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... update_option(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... add_option(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... delete_option(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... update_site_option(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... add_site_option(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... delete_site_option(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... set_theme_mod(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... remove_theme_mod(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... update_post_meta(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... add_post_meta(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... delete_post_meta(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... update_user_meta(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... add_user_meta(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... delete_user_meta(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... update_user_option(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... delete_user_option(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... update_term_meta(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... add_term_meta(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... delete_term_meta(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... update_metadata(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... add_metadata(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... delete_metadata(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... update_field(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... delete_field(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_insert_post(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_update_post(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_delete_post(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_trash_post(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_insert_user(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_update_user(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_delete_user(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_set_object_terms(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_set_post_terms(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_insert_term(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_update_term(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_delete_term(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_insert_attachment(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_delete_attachment(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_insert_comment(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_update_comment(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... wp_delete_comment(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... $U->set_role(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... $U->add_cap(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... $wpdb->insert(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... $wpdb->update(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... $wpdb->delete(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... $wpdb->replace(...) ...>; ... }'
+          - pattern-inside: 'function (...) { ... <... $wpdb->query(...) ...>; ... }'
+    - pattern-not-inside: 'function $F(...) { ... <... current_user_can(...) ...>; ... }'
+    - pattern-not-inside: 'function $F(...) { ... <... user_can(...) ...>; ... }'
+    - pattern-not-inside: 'function $F(...) { ... <... $CAPUSER->has_cap(...) ...>; ... }'
+    - pattern-not-inside: 'function $F(...) { ... <... is_super_admin(...) ...>; ... }'
+    - pattern-not-inside: 'function (...) { ... <... current_user_can(...) ...>; ... }'
+    - pattern-not-inside: 'function (...) { ... <... user_can(...) ...>; ... }'
+    - pattern-not-inside: 'function (...) { ... <... $CAPUSER->has_cap(...) ...>; ... }'
+    - pattern-not-inside: 'function (...) { ... <... is_super_admin(...) ...>; ... }'
+- id: dp-sec-018
+  languages:
+  - php
+  severity: WARNING
+  message: 'DP-SEC-018: a signature, token or hash is compared with ==/===/strcmp. Use hash_equals( $expected, $received )
+    so the comparison time does not leak the value.'
+  metadata:
+    dp-sec-id: DP-SEC-018
+    cwe: 'CWE-208: Observable Timing Discrepancy'
+  patterns:
+  - pattern-either:
+    - pattern: '$S == $O'
+    - pattern: '$O == $S'
+    - pattern: '$S === $O'
+    - pattern: '$O === $S'
+    - pattern: '$S != $O'
+    - pattern: '$O != $S'
+    - pattern: '$S !== $O'
+    - pattern: '$O !== $S'
+    - pattern: 'strcmp($S, $O)'
+    - pattern: 'strcmp($O, $S)'
+    - pattern: 'strcasecmp($S, $O)'
+    - pattern: 'strcasecmp($O, $S)'
+  - metavariable-regex:
+      metavariable: '$S'
+      regex: '(?is)^(?![''\"])(?!.*(_count|_type|_algo|_len|_length|_name|_id|cache)\b)(?!.*cache).*(signature|hmac|\bsig\b|_sig\b|token|secret|digest|api_?key|hash|md5\(|sha1\()'
+  - metavariable-regex:
+      metavariable: '$O'
+      regex: '(?is)^(?!(null|true|false|-?\d+|array\(\s*\)|\[\s*\]|[''\"].*|\\?[A-Z][A-Z0-9_]*|(self|static|parent)::\w+|\\?\w+::[A-Z][A-Z0-9_]*|\$\w*(_count|_len|_length|_type|_algo|_id|_name))$)'
+  - pattern-not-inside: hash_equals(...)
+- id: dp-sec-019
+  languages:
+  - php
+  severity: ERROR
+  message: 'DP-SEC-019: a request value sets a redirect target (open redirect). Use wp_safe_redirect() (allowed hosts only)
+    or wp_validate_redirect( $url, $fallback ), then exit.'
+  metadata:
+    dp-sec-id: DP-SEC-019
+    cwe: 'CWE-601: URL Redirection to Untrusted Site'
+  mode: taint
+  pattern-sources: *id001
+  pattern-sanitizers:
+  - pattern: wp_validate_redirect(...)
+  - *id002
+  - *id003
+  - *id004
+  - *id005
+  - *id006
+  - *id007
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: 'wp_redirect($URL, ...)'
+      - pattern: 'header($URL, ...)'
+    - focus-metavariable: '$URL'

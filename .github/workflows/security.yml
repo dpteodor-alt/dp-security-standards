@@ -1,0 +1,115 @@
+# Reusable security gate for consumer repos (plugins, themes, mu-plugins).
+#
+# Consumer workflow (.github/workflows/security.yml in the plugin repo):
+#
+#   name: security
+#   on: [push, pull_request]
+#   permissions:
+#     contents: read
+#   jobs:
+#     dp-security:
+#       uses: dpteodor-alt/dp-security-standards/.github/workflows/security.yml@v1
+#
+# Optional files in the consumer repo:
+#   .dp-security/baseline.json  known findings at adoption time (create with mode: baseline)
+#   .dp-security/phpcs.xml      extends ../.dp-security-standards/phpcs/ruleset.xml with project helpers
+name: dp-security
+
+on:
+  workflow_call:
+    inputs:
+      standards-ref:
+        description: Tag or branch of dp-security-standards to use. Keep it equal to the tag in "uses:".
+        type: string
+        default: v1
+      standards-repo:
+        description: owner/name of the standards repo. Empty = <caller owner>/dp-security-standards.
+        type: string
+        default: ''
+      paths:
+        description: Space-separated paths to scan, relative to the repo root.
+        type: string
+        default: .
+      baseline:
+        description: Baseline file in the consumer repo.
+        type: string
+        default: .dp-security/baseline.json
+      fail-on-warnings:
+        description: Also fail on new warnings.
+        type: boolean
+        default: false
+      mode:
+        description: "check (default) or baseline (writes the baseline file and uploads it as an artifact)."
+        type: string
+        default: check
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    name: DP security gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      STANDARDS_DIR: .dp-security-standards
+      SCAN_PATHS: ${{ inputs.paths }}
+      BASELINE: ${{ inputs.baseline }}
+      GATE_MODE: ${{ inputs.mode }}
+      FAIL_ON_WARNINGS: ${{ inputs.fail-on-warnings }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Checkout dp-security-standards
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.standards-repo != '' && inputs.standards-repo || format('{0}/dp-security-standards', github.repository_owner) }}
+          ref: ${{ inputs.standards-ref }}
+          path: .dp-security-standards
+          persist-credentials: false
+
+      - name: Install PHPCS + WPCS
+        working-directory: .dp-security-standards
+        run: composer install --no-dev --no-interaction --no-progress --prefer-dist
+
+      - name: Install Semgrep
+        run: |
+          source "$STANDARDS_DIR/tools.env"
+          pipx install "semgrep==${SEMGREP_VERSION}"
+
+      - name: PHPCS (security sniffs)
+        run: |
+          ruleset="$STANDARDS_DIR/phpcs/ruleset.xml"
+          if [ -f .dp-security/phpcs.xml ]; then ruleset=.dp-security/phpcs.xml; fi
+          read -r -a targets <<< "$SCAN_PATHS"
+          # PHPCS exits non-zero when it finds something; the gate decides. A crash leaves no valid JSON.
+          "$STANDARDS_DIR/vendor/bin/phpcs" --standard="$ruleset" --report=json --report-file=dp-phpcs.json \
+            --ignore="*/$STANDARDS_DIR/*,*/vendor/*,*/node_modules/*" -q "${targets[@]}" || true
+          python3 -c 'import json; json.load(open("dp-phpcs.json"))'
+
+      - name: Semgrep (DP-SEC rules)
+        run: |
+          read -r -a targets <<< "$SCAN_PATHS"
+          semgrep scan --config "$STANDARDS_DIR/semgrep/dp-sec.yml" --metrics=off --disable-version-check \
+            --exclude "$STANDARDS_DIR" --json --output dp-semgrep.json "${targets[@]}"
+
+      - name: Gate
+        run: |
+          if [ "$GATE_MODE" = "baseline" ]; then
+            python3 "$STANDARDS_DIR/bin/dp-gate.py" baseline --root . --phpcs dp-phpcs.json --semgrep dp-semgrep.json --baseline "$BASELINE"
+            exit 0
+          fi
+          extra=()
+          if [ "$FAIL_ON_WARNINGS" = "true" ]; then extra+=(--fail-on-warnings); fi
+          python3 "$STANDARDS_DIR/bin/dp-gate.py" check --root . --phpcs dp-phpcs.json --semgrep dp-semgrep.json \
+            --baseline "$BASELINE" "${extra[@]}"
+
+      - name: Upload baseline
+        if: inputs.mode == 'baseline'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dp-security-baseline
+          path: ${{ inputs.baseline }}

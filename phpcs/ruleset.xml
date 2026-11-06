@@ -1,0 +1,79 @@
+<?xml version="1.0"?>
+<!--
+	DP Security Standards — PHPCS ruleset (security sniffs only).
+
+	Built for PHP_CodeSniffer 3.13.x + WordPress Coding Standards 3.4.x.
+	Formatting, naming and documentation sniffs are deliberately absent: this ruleset is a
+	security gate, not a style guide. Rule IDs refer to README.md.
+
+	Consumer repos can extend it with their own helpers in .dp-security/phpcs.xml, e.g.
+		<rule ref="../.dp-security-standards/phpcs/ruleset.xml"/>
+		<rule ref="WordPress.Security.EscapeOutput">
+			<properties>
+				<property name="customEscapingFunctions" type="array">
+					<element value="dp_esc_svg"/>
+				</property>
+			</properties>
+		</rule>
+-->
+<ruleset name="DPSecurity">
+	<description>DP Security Standards: WordPress security sniffs only.</description>
+
+	<arg name="extensions" value="php"/>
+	<arg name="report-width" value="120"/>
+
+	<!-- WP 6.2+ enables the %i identifier placeholder in WordPress.DB.PreparedSQLPlaceholders. -->
+	<config name="minimum_wp_version" value="6.2"/>
+
+	<exclude-pattern>*/vendor/*</exclude-pattern>
+	<exclude-pattern>*/node_modules/*</exclude-pattern>
+	<exclude-pattern>*/build/*</exclude-pattern>
+	<exclude-pattern>*/dist/*</exclude-pattern>
+	<exclude-pattern>*/.dp-security-standards/*</exclude-pattern>
+
+	<!-- DP-SEC-009: $wpdb queries without prepare(); placeholder misuse. -->
+	<rule ref="WordPress.DB.PreparedSQL"/>
+	<rule ref="WordPress.DB.PreparedSQLPlaceholders"/>
+
+	<!-- DP-SEC-010: unescaped output. -->
+	<rule ref="WordPress.Security.EscapeOutput">
+		<!-- Exception messages are not output in our code; this code is noise for the gate. -->
+		<exclude name="WordPress.Security.EscapeOutput.ExceptionNotEscaped"/>
+		<properties>
+			<!-- Shared DP helpers that return escaped markup. Keep this list short and reviewed. -->
+			<property name="customEscapingFunctions" type="array">
+				<element value="dp_kses_svg"/>
+			</property>
+			<property name="customAutoEscapedFunctions" type="array">
+				<element value="get_block_wrapper_attributes"/>
+			</property>
+		</properties>
+	</rule>
+
+	<!-- DP-SEC-011: $_POST / $_GET processing without nonce verification.
+	     "Missing" (POST) is an error; "Recommended" (GET) stays a warning. -->
+	<rule ref="WordPress.Security.NonceVerification">
+		<properties>
+			<property name="customNonceVerificationFunctions" type="array">
+				<element value="dp_verify_request_nonce"/>
+			</property>
+		</properties>
+	</rule>
+
+	<!-- DP-SEC-012: unsanitized or unvalidated input. -->
+	<rule ref="WordPress.Security.ValidatedSanitizedInput">
+		<properties>
+			<property name="customSanitizingFunctions" type="array">
+				<element value="dp_allowlist"/>
+			</property>
+		</properties>
+	</rule>
+	<!-- Missing wp_unslash() is a correctness problem, not a security finding on its own. -->
+	<rule ref="WordPress.Security.ValidatedSanitizedInput.MissingUnslash">
+		<type>warning</type>
+	</rule>
+
+	<!-- DP-SEC-019 (PHPCS side): wp_redirect() instead of wp_safe_redirect(). Warning only;
+	     the Semgrep rule dp-sec-019 is the error for request-controlled targets. -->
+	<rule ref="WordPress.Security.SafeRedirect"/>
+</ruleset>
