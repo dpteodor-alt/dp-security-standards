@@ -64,7 +64,9 @@ gate() { # $1 = expected exit code, rest = extra gate args
 	run_phpcs "$WORK/c-phpcs.json" src
 	run_semgrep "$WORK/c-semgrep.json" src
 	set +e
-	"$PYTHON" "$ROOT/bin/dp-gate.py" check --root . --phpcs "$WORK/c-phpcs.json" --semgrep "$WORK/c-semgrep.json" \
+	# Run the gate as it runs locally: no GitHub annotations or step summary from the self-test.
+	env -u GITHUB_ACTIONS -u GITHUB_STEP_SUMMARY \
+		"$PYTHON" "$ROOT/bin/dp-gate.py" check --root . --phpcs "$WORK/c-phpcs.json" --semgrep "$WORK/c-semgrep.json" \
 		--baseline .dp-security/baseline.json "$@" > "$WORK/gate.out" 2>&1
 	local code=$?
 	set -e
@@ -82,7 +84,8 @@ gate 1
 echo "-- b) baseline created: same code passes"
 run_phpcs "$WORK/c-phpcs.json" src
 run_semgrep "$WORK/c-semgrep.json" src
-"$PYTHON" "$ROOT/bin/dp-gate.py" baseline --root . --phpcs "$WORK/c-phpcs.json" --semgrep "$WORK/c-semgrep.json" \
+env -u GITHUB_ACTIONS -u GITHUB_STEP_SUMMARY \
+	"$PYTHON" "$ROOT/bin/dp-gate.py" baseline --root . --phpcs "$WORK/c-phpcs.json" --semgrep "$WORK/c-semgrep.json" \
 	--baseline .dp-security/baseline.json
 gate 0
 
